@@ -35,6 +35,8 @@ class Meta(nn.Module):
 
         self.update_lr = args.update_lr
         self.meta_lr = args.meta_lr
+        self.adv_lr = args.adv_lr
+        self.rho = args.rho
         self.n_way = args.n_way
         self.k_spt = args.k_spt
         self.k_qry = args.k_qry
@@ -49,7 +51,7 @@ class Meta(nn.Module):
         self.net = Learner(config, args.imgc, args.imgsz)
         self.meta_optim = optim.Adam(self.net.parameters(), lr=self.meta_lr)
         #self.meta_optimadv = optim.Adam(self.netadv.parameters(), lr=self.meta_lr)
-        self.meta_optim_adv = optim.Adam(self.net.parameters(), lr=0.002)
+        self.meta_optim_adv = optim.Adam(self.net.parameters(), lr=self.adv_lr)
 
     def clip_grad_by_norm_(self, grad, max_norm):
         """
@@ -75,7 +77,7 @@ class Meta(nn.Module):
         return total_norm/counter
 
 
-    def forward(self, x_spt, y_spt, x_qry, y_qry, adv_loss_on):
+    def forward(self, x_spt, y_spt, x_qry, y_qry):
         """
         :param x_spt:   [b, setsz, c_, h, w]
         :param y_spt:   [b, setsz]
@@ -83,14 +85,14 @@ class Meta(nn.Module):
         :param y_qry:   [b, querysz]
         :return:
         """
-        
+        make_time = 0 # adv sample 생성 시간
         task_num, setsz, c_, h, w = x_spt.size()
         querysz = x_qry.size(1)
 
         losses_q = [0 for _ in range(self.update_step + 1)]  # losses_q[i] is the loss on step i
         corrects = [0 for _ in range(self.update_step + 1)]
         
-        need_adv = adv_loss_on
+        need_adv = True
         #AT
         optimizer = torch.optim.SGD(self.net.parameters(), lr=self.update_lr, momentum=0.9, weight_decay=5e-4)
         losses_q_adv = [0 for _ in range(self.update_step + 1)]
@@ -147,10 +149,13 @@ class Meta(nn.Module):
                 if need_adv and k == self.update_step - 1: # for meta-update
                     
                     net_copy = deepcopy(self.net)
-                    at= aRUB(rho=0.03, q=1, n_way=self.n_way, k_qry=self.k_qry, imgc=self.imgc, imgsz=self.imgsz)
+                    at= aRUB(rho=self.rho, q=1, n_way=self.n_way, k_qry=self.k_qry, imgc=self.imgc, imgsz=self.imgsz)
                     optimizer.zero_grad()
+                    
+                    t = time.perf_counter()
                     logits_q_adv = at.aRUBattack(data=x_qry[i], label=y_qry[i], net=net_copy, weights=fast_weights)
-
+                    make_time += time.perf_counter() - t
+                    
                     loss_q_adv = F.cross_entropy(logits_q_adv, y_qry[i])
                     losses_q_adv[k + 1] = losses_q_adv[k+1] + loss_q_adv
                 
@@ -191,7 +196,7 @@ class Meta(nn.Module):
             accs_adv = 0
         
 
-        return accs, accs_adv, loss_q, loss_q_adv
+        return accs, accs_adv, loss_q, loss_q_adv, make_time
 
 
     def finetunning(self, x_spt, y_spt, x_qry, y_qry):
@@ -228,7 +233,7 @@ class Meta(nn.Module):
         
         #PGD AT
         if need_adv:
-            at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step)
+            at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step, norm=2)
             data = x_qry
             label = y_qry
             optimizer.zero_grad()
@@ -308,7 +313,7 @@ class Meta(nn.Module):
 
             if need_adv:
 
-                at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step)
+                at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=step, norm=2)
                 data = x_qry
                 label = y_qry
                 optimizer.zero_grad()
@@ -344,7 +349,7 @@ class Meta(nn.Module):
         
         accs_adv_prior = np.array(corrects_adv_prior)
 
-        return accs, accs_adv, accs_adv_prior
+        return accs, accs_adv, accs_adv_prior, loss_q, loss_q_adv
 
 
 def main():

@@ -17,6 +17,9 @@ from    learner import Learner
 from    copy import deepcopy
 from attack import PGD
 
+#import advertorch
+import time
+
 
 
 class Meta(nn.Module):
@@ -44,7 +47,7 @@ class Meta(nn.Module):
         self.net = Learner(config, args.imgc, args.imgsz)
         self.meta_optim = optim.Adam(self.net.parameters(), lr=self.meta_lr)
         #self.meta_optimadv = optim.Adam(self.netadv.parameters(), lr=self.meta_lr)
-        self.meta_optim_adv = optim.Adam(self.net.parameters(), lr=0.0002)
+        self.meta_optim_adv = optim.Adam(self.net.parameters(), lr=0.0003)
 
 
 
@@ -81,6 +84,7 @@ class Meta(nn.Module):
         :param y_qry:   [b, querysz]
         :return:
         """
+        make_time = 0 #adv sample 생성 시간
         task_num, setsz, c_, h, w = x_spt.size()
         querysz = x_qry.size(1)
 
@@ -172,8 +176,10 @@ class Meta(nn.Module):
                     data = x_qry[i]
                     label = y_qry[i]
                     optimizer.zero_grad()
-
+                    
+                    t = time.perf_counter()
                     adv_inp_adv = at.attack(self.net, fast_weights, data, label)
+                    make_time += time.perf_counter() - t
                     
                     self.net.train()
                     logits_q_adv = self.net(adv_inp_adv, fast_weights, bn_training=True)
@@ -225,7 +231,7 @@ class Meta(nn.Module):
         accs = np.array(corrects) / (querysz * task_num)
         accs_adv = np.array(corrects_adv) / (querysz * task_num)
 
-        return accs, accs_adv, loss_q, loss_q_adv
+        return accs, accs_adv, loss_q, loss_q_adv, make_time
 
 
     def finetunning(self, x_spt, y_spt, x_qry, y_qry):
@@ -262,15 +268,14 @@ class Meta(nn.Module):
         
         #PGD AT
         if need_adv:
-            at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=10)
+            at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=10, norm=2)
+            #at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=10, norm=1)
             data = x_qry
             label = y_qry
             optimizer.zero_grad()
             adv_inp_adv = at.attack(net, fast_weights, data, label)
         
         
-        
-
         # this is the loss and accuracy before first update
         with torch.no_grad():
             # [setsz, nway]
@@ -342,11 +347,13 @@ class Meta(nn.Module):
 
             if need_adv:
 
-                at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=10)
+                at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=10, norm=2)
+                #at = advertorch.attcks.CarliniWagnerL2Attack(net, 5)
                 data = x_qry
                 label = y_qry
                 optimizer.zero_grad()
                 adv_inp_adv = at.attack(net, fast_weights, data, label)
+                #adv_inp_adv = at.perturb(self, data, y=label)
 
                 logits_q_adv = net(adv_inp_adv, fast_weights, bn_training=True)
                 loss_q_adv = F.cross_entropy(logits_q_adv, label)
