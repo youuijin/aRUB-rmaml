@@ -235,7 +235,7 @@ class Meta(nn.Module):
             at = deepfool(num_classes = self.n_way, device = self.device)
             
             optimizer.zero_grad()
-            '''
+            
             adv_inp = torch.zeros(x_qry.shape).to(self.device)
             for i in range(x_qry.shape[0]):
                 data = x_qry[i]
@@ -244,6 +244,7 @@ class Meta(nn.Module):
                 adv_inp[i] = adv_inp_adv_i
                 '''
             adv_inp = at.dfattack(net, x_qry, y_qry)
+            '''
         
 
         # this is the loss and accuracy before first update
@@ -262,7 +263,7 @@ class Meta(nn.Module):
         #DeepFool AT
         if need_adv:
             optimizer.zero_grad()
-            '''
+            
             adv_inp = torch.zeros(x_qry.shape).to(self.device)
             for i in range(x_qry.shape[0]):
                 data = x_qry[i]
@@ -271,6 +272,7 @@ class Meta(nn.Module):
                 adv_inp[i] = adv_inp_adv_i
                 '''
             adv_inp = at.dfattack(net, x_qry, y_qry)
+            '''
             with torch.no_grad():
                 logits_q_adv = net(adv_inp, net.parameters(), bn_training=True)
                 pred_q_adv = F.softmax(logits_q_adv, dim=1).argmax(dim=1)
@@ -324,7 +326,7 @@ class Meta(nn.Module):
                 data = x_qry
                 label = y_qry
                 optimizer.zero_grad()
-                '''
+                
                 adv_inp = torch.zeros(x_qry.shape).to(self.device)
                 for i in range(x_qry.shape[0]):
                     data = x_qry[i]
@@ -333,7 +335,8 @@ class Meta(nn.Module):
                     adv_inp[i] = adv_inp_adv_i
                     '''
                 adv_inp = at.dfattack(net, x_qry, y_qry)
-
+                '''
+                
                 logits_q_adv = net(adv_inp, fast_weights, bn_training=True)
                 loss_q_adv = F.cross_entropy(logits_q_adv, y_qry)
             

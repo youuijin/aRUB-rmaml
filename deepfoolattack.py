@@ -1,4 +1,4 @@
-'''
+
 import numpy as np
 import copy
 
@@ -105,12 +105,15 @@ class deepfool:
 
         x = pert_images.clone()
         x.requires_grad = True
-
-        fs_list = net(x).squeeze()
-        k_i = labels.clone()
+        
+        #[75,3,28,28]
+        fs_list = net(x).squeeze() #[75,5]
+        k_i = labels.clone() #[75]
 
         while (k_i == labels).sum() > 0 and loop_i < self.max_iter:
-            pert = torch.full((labels.shape[0],), np.inf, device=self.device) #[75] -> 각 pert의 최소를 구하기 위함
+            pert = torch.full((labels.shape[0],), np.inf, device=self.device) 
+            #[75] -> 각 pert의 최소를 구하기 위함
+            print(torch.ones_like(fs_list[labels]))
             fs_list[labels].backward(torch.ones_like(fs_list[labels]), retain_graph=True)
             grad_orig = x.grad.data.clone() # grad f_k(x_i)
 
@@ -118,15 +121,18 @@ class deepfool:
                 mask = (k != labels)
                 if mask.sum() > 0:
                     x.grad.zero_()
-
                     fs_list[k].backward(torch.ones_like(fs_list[k]), retain_graph=True)
                     cur_grad = x.grad.data.clone() # grad f_k(x_i)
                     
                     # set new w_k and new f_k
                     w_k = cur_grad - grad_orig #[75,3,28,28]
                     fs_label = torch.zeros([75]).to(self.device)
+                    print(fs_list)
                     for i in range(self.num_classes):
+                        #print(fs_list[i*15,labels[i*15]].data)
                         fs_label[i*15:(i+1)*15] = fs_list[i*15,labels[i*15]].data
+                        #print(fs_label)
+                    #print(loop_i, k, fs_label)
                     f_k = (fs_list[:,k] - fs_label).data #[75,1]
 
                     #print(torch.norm(w_k.reshape(w_k.shape[0], -1), dim=1).shape)
@@ -158,3 +164,4 @@ class deepfool:
         r_tot = (1 + self.overshoot) * r_tot
 
         return pert_images
+'''
