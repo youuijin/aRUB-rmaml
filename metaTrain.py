@@ -1,3 +1,9 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
 import  torch
 from    torch import nn
 from    torch import optim
@@ -5,15 +11,14 @@ from    torch.nn import functional as F
 from    torch.utils.data import TensorDataset, DataLoader
 from    torch import optim
 import  numpy as np
-from torch.autograd import Variable
+#from torch.autograd import Variable
 
 from    learner import Learner
 from    copy import deepcopy
-from attack import PGD
-from deepfoolattack import deepfool
-
-#import advertorch
+from aRUBattack import aRUB
 import time
+
+import advertorch.attacks as attacks
 
 
 
@@ -25,11 +30,12 @@ class Meta(nn.Module):
         """
         :param args:
         """
-        print("init")
         super(Meta, self).__init__()
 
         self.update_lr = args.update_lr
         self.meta_lr = args.meta_lr
+        self.adv_lr = args.adv_lr
+        self.rho = args.rho
         self.n_way = args.n_way
         self.k_spt = args.k_spt
         self.k_qry = args.k_qry
@@ -37,15 +43,57 @@ class Meta(nn.Module):
         self.update_step = args.update_step
         self.update_step_test = args.update_step_test
         self.device = device
+        self.imgc = args.imgc
+        self.imgsz = args.imgsz
+        self.eps = args.eps
+        
+        self.args = args
 
-
-        self.net = Learner(config, args.imgc, args.imgsz)
+        self.net = Learner(config, self.imgc, self.imgsz)
         self.meta_optim = optim.Adam(self.net.parameters(), lr=self.meta_lr)
-        #self.meta_optimadv = optim.Adam(self.netadv.parameters(), lr=self.meta_lr)
-        self.meta_optim_adv = optim.Adam(self.net.parameters(), lr=0.0003)
+        self.meta_optim_adv = optim.Adam(self.net.parameters(), lr=self.adv_lr)
 
+        self.at = self.setAttack(args.attack)
+        self.test_at = self.setAttack(args.test_attack)
 
-
+    def setAttack(self, str_at):
+        if str_at == "PGD_L1":
+            return attacks.L1PGDAttack(self.net, eps=self.eps, nb_iter=10)
+        elif str_at == "PGD_L2":
+            return attacks.L2PGDAttack(self.net, eps=self.eps, nb_iter=10)
+        elif str_at == "PGD_Linf":
+            return attacks.LinfPGDAttack(self.net, eps=self.eps, nb_iter=10)
+        elif str_at == "FGSM":
+            return attacks.GradientSignAttack(self.net, eps=self.eps)
+        elif str_at == "FFA":
+            return attacks.FastFeatureAttack(self.net, eps=self.eps, nb_iter=10)
+        elif str_at == "BIM_L2":
+            return attacks.L2BasicIterativeAttack(self.net, eps=self.eps, nb_iter=10)
+        elif str_at == "BIM_Linf":
+            return attacks.LinfBasicIterativeAttack(self.net, eps=self.eps, nb_iter=10)
+        elif str_at == "MI-FGSM":
+            return attacks.MomentumIterativeAttack(self.net, eps=self.eps, nb_iter=10) # 0.3, 40
+        elif str_at == "CnW":
+            return attacks.CarliniWagnerL2Attack(self.net, self.n_way)
+        elif str_at == "EAD":
+            return attacks.ElasticNetL1Attack(self.net, self.n_way)
+        elif str_at == "DDN":
+            return attacks.DDNL2Attack(self.net)
+        elif str_at == "LBFGS":
+            return attacks.LBFGSAttack(self.net, self.n_way, max_iterations=10)
+        elif str_at == "Single_pixel":
+            return attacks.SinglePixelAttack(self.net)
+        elif str_at == "Local_search":
+            return attacks.LocalSearchAttack(self.net)
+        elif str_at == "ST":
+            return attacks.SpatialTransformAttack(self.net, self.n_way)
+        elif str_at == "JSMA":
+            return attacks.JacobianSaliencyMapAttack(self.net, self.n_way)
+        elif str_at == "aRUB":
+            return aRUB(self.net, rho=self.rho, q=1, n_way=self.n_way, k_qry=self.k_qry, imgc=self.imgc, imgsz=self.imgsz)
+        else:
+            print("wrong type Attack")
+            exit()
 
     def clip_grad_by_norm_(self, grad, max_norm):
         """
@@ -54,7 +102,6 @@ class Meta(nn.Module):
         :param max_norm: maximum norm allowable
         :return:
         """
-
         total_norm = 0
         counter = 0
         for g in grad:
@@ -79,29 +126,26 @@ class Meta(nn.Module):
         :param y_qry:   [b, querysz]
         :return:
         """
-        make_time = 0 #adv sample 생성 시간
-        task_num, setsz, c_, h, w = x_spt.size()
+        make_time = 0 # adv sample 생성 시간
+        task_num = x_spt.size(0)
         querysz = x_qry.size(1)
 
+        need_adv = True
+        optimizer = torch.optim.SGD(self.net.parameters(), lr=self.update_lr, momentum=0.9, weight_decay=5e-4)
         losses_q = [0 for _ in range(self.update_step + 1)]  # losses_q[i] is the loss on step i
         corrects = [0 for _ in range(self.update_step + 1)]
-        
-        need_adv = True
-        #AT
-        optimizer = torch.optim.SGD(self.net.parameters(), lr=self.update_lr, momentum=0.9, weight_decay=5e-4)
-        eps, step = (4.0,10)
         losses_q_adv = [0 for _ in range(self.update_step + 1)]
         corrects_adv = [0 for _ in range(self.update_step + 1)]
+        
+        net_copy = deepcopy(self.net)
 
 
         for i in range(task_num):
-
             # 1. run the i-th task and compute loss for k=0
             logits = self.net(x_spt[i], vars=None, bn_training=True)
             loss = F.cross_entropy(logits, y_spt[i])
             grad = torch.autograd.grad(loss, self.net.parameters())
             fast_weights = list(map(lambda p: p[1] - self.update_lr * p[0], zip(grad, self.net.parameters())))
-            
 
             # this is the loss and accuracy before first update
             with torch.no_grad():
@@ -133,62 +177,24 @@ class Meta(nn.Module):
                 loss = F.cross_entropy(logits, y_spt[i])
                 # 2. compute grad on theta_pi
                 grad = torch.autograd.grad(loss, fast_weights)
+                
                 # 3. theta_pi = theta_pi - train_lr * grad
                 fast_weights = list(map(lambda p: p[1] - self.update_lr * p[0], zip(grad, fast_weights)))
-
                 
+                logits_q = self.net(x_qry[i], fast_weights, bn_training=True)
+                loss_q = F.cross_entropy(logits_q, y_qry[i])
+                losses_q[k + 1] = losses_q[k+1] + loss_q
                 
-                #PGD AT
-                if need_adv and k == self.update_step - 1:
-                    '''
-                    data = x_qry[i]
-                    label = y_qry[i]
-                    self.net.eval()
-                    #data.requires_grad = True
-                    global_noise_data = torch.zeros(list(data.size())).to(self.device)
-                    global_noise_data.uniform_(-eps/255.0, eps/255.0)
-                    noise_batch = Variable(global_noise_data[0:data.size(0)], requires_grad=True).to(self.device)
-                    adv_inp_adv = data + noise_batch
-                    adv_inp_adv.clamp_(0, 1.0)
-                    logits = self.net(adv_inp_adv, fast_weights, bn_training=True)
-                    loss = F.cross_entropy(logits, label)
-                    loss.backward()
-                    #grad_sign = torch.autograd.grad(loss, data, only_inputs=True, retain_graph = False)[0].sign()
-                    global_noise_data = global_noise_data + 1.25*eps/255.0*torch.sign(noise_batch.grad)#grad_sign
-                    global_noise_data.clamp_(-eps/255.0, eps/255.0)
-                    noise_batch = Variable(global_noise_data[0:data.size(0)], requires_grad=False).to(self.device)
-                    adv_inp_adv = data + noise_batch
-                    adv_inp_adv.clamp_(0, 1.0)
-                    
-                    self.net.train()
-                    logits_q_adv = self.net(adv_inp_adv, fast_weights, bn_training=True)
-                    loss_q_adv = F.cross_entropy(logits_q_adv, label)
-                    losses_q_adv[k + 1] += loss_q_adv #마지막 step에서만 global noise 추가하여 loss_adv 계산 -> robustness 측정
-                    self.net.train()
-                    '''
-                    #net = deepcopy(self.net)
-                    at = PGD(eps=eps / 255.0, sigma=2 / 255.0, nb_iter=10)
-                    data = x_qry[i]
-                    label = y_qry[i]
+                # adversarial / approximation attack
+                if need_adv and k == self.update_step - 1: # for meta-update
                     optimizer.zero_grad()
                     
                     t = time.perf_counter()
-                    adv_inp_adv = at.attack(self.net, fast_weights, data, label)
+                    logits_q_adv = self.at.perturb(fast_weights, x_qry[i], y_qry[i])
                     make_time += time.perf_counter() - t
                     
-                    self.net.train()
-                    logits_q_adv = self.net(adv_inp_adv, fast_weights, bn_training=True)
-                    loss_q_adv = F.cross_entropy(logits_q_adv, label)
-                    losses_q_adv[k + 1] += loss_q_adv #마지막 step에서만 global noise 추가하여 loss_adv 계산 -> robustness 측정
-                    
-                    
-                    
-                    
-
-                logits_q = self.net(x_qry[i], fast_weights, bn_training=True)
-                # loss_q will be overwritten and just keep the loss_q on last update step.
-                loss_q = F.cross_entropy(logits_q, y_qry[i])
-                losses_q[k + 1] += loss_q
+                    loss_q_adv = F.cross_entropy(logits_q_adv, y_qry[i])
+                    losses_q_adv[k + 1] = losses_q_adv[k+1] + loss_q_adv
                 
 
                 with torch.no_grad():
@@ -199,10 +205,10 @@ class Meta(nn.Module):
                     #PGD AT
                     if need_adv and k == self.update_step - 1:
                         pred_q_adv = F.softmax(logits_q_adv, dim=1).argmax(dim=1)
-                        correct_adv = torch.eq(pred_q_adv, label).sum().item()
+                        correct_adv = torch.eq(pred_q_adv, y_qry[i]).sum().item()
                         corrects_adv[k + 1] = corrects_adv[k + 1] + correct_adv
 
-
+        del net_copy        
 
         # end of all tasks
         # sum over all losses on query set across all tasks
@@ -213,18 +219,17 @@ class Meta(nn.Module):
         # optimize theta parameters
         self.meta_optim.zero_grad()
         loss_q.backward()
-        # print('meta update')
-        # for p in self.net.parameters()[:5]:
-        # 	print(torch.norm(p).item())
         self.meta_optim.step()
-        
-        self.meta_optim_adv.zero_grad()
-        loss_q_adv.backward()
-        self.meta_optim_adv.step()
-
-
         accs = np.array(corrects) / (querysz * task_num)
-        accs_adv = np.array(corrects_adv) / (querysz * task_num)
+        
+        if need_adv:
+            self.meta_optim_adv.zero_grad()
+            loss_q_adv.backward()
+            self.meta_optim_adv.step()
+            accs_adv = np.array(corrects_adv) / (querysz * task_num)
+        else:
+            accs_adv = 0
+        
 
         return accs, accs_adv, loss_q, loss_q_adv, make_time
 
@@ -258,23 +263,15 @@ class Meta(nn.Module):
         loss = F.cross_entropy(logits, y_spt)
         grad = torch.autograd.grad(loss, net.parameters())
         fast_weights = list(map(lambda p: p[1] - self.update_lr * p[0], zip(grad, net.parameters())))
-          
-        #DeepFool AT
-        if need_adv:
-            at = deepfool(num_classes = self.n_way, device = self.device)
-            
-            optimizer.zero_grad()
-            '''
-            adv_inp = torch.zeros(x_qry.shape).to(self.device)
-            for i in range(x_qry.shape[0]):
-                data = x_qry[i]
-                label = y_qry[i]
-                adv_inp_adv_i = at.dfattack(net, data, label)
-                adv_inp[i] = adv_inp_adv_i
-                '''
-            adv_inp = at.dfattack(net, x_qry, y_qry)
         
-
+        
+        # Adversaruak Attack
+        if need_adv:
+            data = x_qry
+            label = y_qry
+            optimizer.zero_grad()
+            adv_inp_adv = self.test_at.perturb(fast_weights, data, label)
+        
         # this is the loss and accuracy before first update
         with torch.no_grad():
             # [setsz, nway]
@@ -287,28 +284,21 @@ class Meta(nn.Module):
             correct = torch.eq(pred_q, y_qry).sum().item()
             corrects[0] = corrects[0] + correct
             
-        
-        #DeepFool AT
+            
+        #PGD AT
         if need_adv:
+            data = x_qry
+            label = y_qry
             optimizer.zero_grad()
-            '''
-            adv_inp = torch.zeros(x_qry.shape).to(self.device)
-            for i in range(x_qry.shape[0]):
-                data = x_qry[i]
-                label = y_qry[i]
-                adv_inp_adv_i = at.dfattack(net, data, label)
-                adv_inp[i] = adv_inp_adv_i
-                '''
-            adv_inp = at.dfattack(net, x_qry, y_qry)
+            adv_inp = self.test_at.perturb(net.parameters(), data, label)
             with torch.no_grad():
                 logits_q_adv = net(adv_inp, net.parameters(), bn_training=True)
                 pred_q_adv = F.softmax(logits_q_adv, dim=1).argmax(dim=1)
-                correct_adv = torch.eq(pred_q_adv, y_qry).sum().item()
-                correct_adv_prior = torch.eq(pred_q_adv[corr_ind], y_qry[corr_ind]).sum().item()
+                correct_adv = torch.eq(pred_q_adv, label).sum().item()
+                correct_adv_prior = torch.eq(pred_q_adv[corr_ind], label[corr_ind]).sum().item()
                 corrects_adv[0] = corrects_adv[0] + correct_adv
                 if len(corr_ind)!=0:
                     corrects_adv_prior[0] = corrects_adv_prior[0] + correct_adv_prior/len(corr_ind)
-                ########수정한 부분##########
 
         # this is the loss and accuracy after the first update
         with torch.no_grad():
@@ -325,10 +315,10 @@ class Meta(nn.Module):
             
             #PGD AT
             if need_adv:
-                logits_q_adv = net(adv_inp, fast_weights, bn_training=True)
+                logits_q_adv = net(adv_inp_adv, fast_weights, bn_training=True)
                 pred_q_adv = F.softmax(logits_q_adv, dim=1).argmax(dim=1)
-                correct_adv = torch.eq(pred_q_adv, y_qry).sum().item()
-                correct_adv_prior = torch.eq(pred_q_adv[corr_ind], y_qry[corr_ind]).sum().item()
+                correct_adv = torch.eq(pred_q_adv, label).sum().item()
+                correct_adv_prior = torch.eq(pred_q_adv[corr_ind], label[corr_ind]).sum().item()
                 corrects_adv[1] = corrects_adv[1] + correct_adv
                 corrects_adv_prior[1] = corrects_adv_prior[1] + correct_adv_prior/len(corr_ind)
             
@@ -346,28 +336,18 @@ class Meta(nn.Module):
             # loss_q will be overwritten and just keep the loss_q on last update step.
             loss_q = F.cross_entropy(logits_q, y_qry)
             
-            #DeepFool AT
             
+            
+            # Adversarial Attack
             if need_adv:
-                at = deepfool(num_classes = self.n_way, device = self.device)
                 data = x_qry
                 label = y_qry
                 optimizer.zero_grad()
-                '''
-                adv_inp = torch.zeros(x_qry.shape).to(self.device)
-                for i in range(x_qry.shape[0]):
-                    data = x_qry[i]
-                    label = y_qry[i]
-                    adv_inp_adv_i = at.dfattack(net, data, label)
-                    adv_inp[i] = adv_inp_adv_i
-                    '''
-                adv_inp = at.dfattack(net, x_qry, y_qry)
+                adv_inp_adv = self.test_at.perturb(fast_weights, data, label)
 
-                logits_q_adv = net(adv_inp, fast_weights, bn_training=True)
-                loss_q_adv = F.cross_entropy(logits_q_adv, y_qry)
-            
-            
-
+                logits_q_adv = net(adv_inp_adv, fast_weights, bn_training=True)
+                loss_q_adv = F.cross_entropy(logits_q_adv, label)
+        
             with torch.no_grad():
                 pred_q = F.softmax(logits_q, dim=1).argmax(dim=1)
                 #find the correct index
@@ -375,12 +355,11 @@ class Meta(nn.Module):
                 correct = torch.eq(pred_q, y_qry).sum().item()  # convert to numpy
                 corrects[k + 1] = corrects[k + 1] + correct
                 
-                
-                #PGD AT
+                # Adversarial Attack
                 if need_adv:
                     pred_q_adv = F.softmax(logits_q_adv, dim=1).argmax(dim=1)
-                    correct_adv = torch.eq(pred_q_adv, y_qry).sum().item()
-                    correct_adv_prior = torch.eq(pred_q_adv[corr_ind], y_qry[corr_ind]).sum().item()
+                    correct_adv = torch.eq(pred_q_adv, label).sum().item()
+                    correct_adv_prior = torch.eq(pred_q_adv[corr_ind], label[corr_ind]).sum().item()
                     corrects_adv[k + 1] = corrects_adv[k + 1] + correct_adv
                     corrects_adv_prior[k + 1] = corrects_adv_prior[k + 1] + correct_adv_prior/len(corr_ind)
 

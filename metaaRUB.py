@@ -239,9 +239,6 @@ class Meta(nn.Module):
             optimizer.zero_grad()
             adv_inp_adv = at.attack(net, fast_weights, data, label)
         
-        
-        
-
         # this is the loss and accuracy before first update
         with torch.no_grad():
             # [setsz, nway]

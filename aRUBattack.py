@@ -6,19 +6,19 @@ from    learner import Learner
 import time
 
 class aRUB:
-    def __init__(self, rho, q, n_way, k_qry, imgc, imgsz):
+    def __init__(self, net, rho, q, n_way, k_qry, imgc, imgsz):
         self.rho = rho
         self.q = q
         self.n_way = n_way
         self.k_qry = k_qry
         self.imgc = imgc
         self.imgsz = imgsz
-        self.device = torch.device('cuda:0')
+        self.net = net
 
     def norm_func(self, x):
             return torch.norm(x, p=self.q)
         
-    def aRUBattack(self, data, label, net, weights):
+    def perturb(self, weights, data, label):
         '''
         Computes approximation of logits
         :param net:
@@ -28,7 +28,7 @@ class aRUB:
         :return: a new perturbation
         '''
         data.requires_grad = True
-        logits = net(data, weights)
+        logits = self.net(data, weights)
         logits_sum = torch.sum(logits, dim=0)        
         flag = True
         for logit in logits_sum:
@@ -46,11 +46,6 @@ class aRUB:
         label_onehot = F.one_hot(label, num_classes=self.n_way)
         logits_label = torch.sum(torch.mul(logits, label_onehot), dim=1)
         
-        '''
-        for cls in range(self.n_way):
-            jac_label_cls = jacobian[cls*self.k_qry:(cls+1)*self.k_qry, label[cls*self.k_qry]]
-            jac_label.append(jac_label_cls.tolist())
-        '''
         label_onehot = torch.unsqueeze(label_onehot, 2).expand(label.shape[0],self.n_way,self.imgc*self.imgsz*self.imgsz).view(label.shape[0],self.n_way,self.imgc, self.imgsz,self.imgsz)
         jac_label = torch.sum(torch.mul(jacobian, label_onehot), dim=1)
         
